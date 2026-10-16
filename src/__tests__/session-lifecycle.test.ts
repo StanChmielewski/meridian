@@ -14,6 +14,7 @@ import {
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  SESSION_GC_CHILD_SCRIPT,
   SessionLifecycleBacklogError,
   SessionLifecycleCorruptError,
   SessionLifecycleLockError,
@@ -479,6 +480,37 @@ describe("session transcript lifecycle", () => {
     expect(result.notFound).toBe(1)
     expect(Object.values(readSidecar(storeDir).resources)[0]?.state).toBe("deleted")
   })
+
+  it("reports a session the SDK cannot find anywhere in a few bytes, under node", () => {
+    // Production backlog (2026-10-16): the SDK's project-less deleteSession throws
+    // "not found in any project directory"; an uncaught throw makes node print the whole
+    // ~86 KB minified SDK line before the message, the parent keeps only its first 64 KiB
+    // under node, so isNotFoundError never saw the message and the resource was retried as
+    // a failure until the 256-entry backlog blocked new sessions.
+    const configDir = mkdtempSync(join(tmpdir(), "meridian-gc-config-"))
+    const gate = join(configDir, "go")
+    writeFileSync(gate, "go\n")
+    const sessionId = crypto.randomUUID()
+    try {
+      const child = Bun.spawnSync(["node", "--input-type=module", "--eval", SESSION_GC_CHILD_SCRIPT], {
+        env: {
+          ...process.env,
+          CLAUDE_CONFIG_DIR: configDir,
+          MERIDIAN_GC_SDK_URL: import.meta.resolve("@anthropic-ai/claude-agent-sdk"),
+          MERIDIAN_GC_SESSION_ID: sessionId,
+          MERIDIAN_GC_PROJECT_DIR: join(configDir, "project"),
+          MERIDIAN_GC_GATE_PATH: gate,
+          MERIDIAN_GC_GATE_TIMEOUT_MS: "5000",
+        },
+      })
+      const output = child.stdout.toString() + child.stderr.toString()
+      expect(child.exitCode).toBe(1)
+      expect(output.length).toBeLessThan(4_000)
+      expect(output).toContain(`Session ${sessionId} not found`)
+    } finally {
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  }, 30_000)
 
   it("does not mistake child ENOENT or generic errors for a missing session", async () => {
     const fork = locator("sdk-load-failure")

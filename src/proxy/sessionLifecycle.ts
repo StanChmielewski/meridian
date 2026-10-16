@@ -923,6 +923,35 @@ async function waitForDeletionExit(
   }
 }
 
+/** Body of the node child that deletes one transcript through the SDK. */
+export const SESSION_GC_CHILD_SCRIPT = `
+const { existsSync } = await import("node:fs");
+const { setTimeout: wait } = await import("node:timers/promises");
+const gateDeadline = Date.now() + Number(process.env.MERIDIAN_GC_GATE_TIMEOUT_MS);
+while (!existsSync(process.env.MERIDIAN_GC_GATE_PATH)) {
+  if (Date.now() >= gateDeadline) process.exit(75);
+  await wait(10);
+}
+const sdk = await import(process.env.MERIDIAN_GC_SDK_URL);
+const options = process.env.MERIDIAN_GC_PROJECT_DIR
+  ? { dir: process.env.MERIDIAN_GC_PROJECT_DIR }
+  : undefined;
+try {
+  try {
+    await sdk.deleteSession(process.env.MERIDIAN_GC_SESSION_ID, options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!options || !message.includes("not found")) throw error;
+    await sdk.deleteSession(process.env.MERIDIAN_GC_SESSION_ID);
+  }
+} catch (error) {
+  // Print the message only: an uncaught throw makes node echo the ~86 KB minified SDK
+  // source line first, and the parent keeps just 64 KiB, losing the "not found" verdict.
+  process.stderr.write((error instanceof Error ? error.message : String(error)) + "\\n");
+  process.exitCode = 1;
+}
+`
+
 async function deleteWithSdkChild(
   locator: TranscriptLocator,
   deletionToken: string,
@@ -937,27 +966,7 @@ async function deleteWithSdkChild(
   await unlink(gatePath).catch((error) => {
     if (!hasCode(error, "ENOENT")) throw error
   })
-  const script = `
-const { existsSync } = await import("node:fs");
-const { setTimeout: wait } = await import("node:timers/promises");
-const gateDeadline = Date.now() + Number(process.env.MERIDIAN_GC_GATE_TIMEOUT_MS);
-while (!existsSync(process.env.MERIDIAN_GC_GATE_PATH)) {
-  if (Date.now() >= gateDeadline) process.exit(75);
-  await wait(10);
-}
-const sdk = await import(process.env.MERIDIAN_GC_SDK_URL);
-const options = process.env.MERIDIAN_GC_PROJECT_DIR
-  ? { dir: process.env.MERIDIAN_GC_PROJECT_DIR }
-  : undefined;
-try {
-  await sdk.deleteSession(process.env.MERIDIAN_GC_SESSION_ID, options);
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!options || !message.includes("not found")) throw error;
-  await sdk.deleteSession(process.env.MERIDIAN_GC_SESSION_ID);
-}
-`
-  const child = spawn(getSessionGcNodeExecutable(), ["--input-type=module", "--eval", script], {
+  const child = spawn(getSessionGcNodeExecutable(), ["--input-type=module", "--eval", SESSION_GC_CHILD_SCRIPT], {
     env: {
       ...process.env,
       CLAUDE_CONFIG_DIR: locator.configDir,
