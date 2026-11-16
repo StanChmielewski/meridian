@@ -75,7 +75,7 @@ import { mapModelToClaudeModel, resolveClaudeExecutableAsync, resolveSdkModelDef
 import type { AnthropicSseEvent } from "./openai"
 import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, buildModelList, createSseTranslator } from "./openai"
 import { normalizeJcodeSessionId } from "./adapters/jcode"
-import { isClaudeCodeClient } from "./adapters/claudecode"
+import { extractClaudeCodeSessionId, isClaudeCodeClient } from "./adapters/claudecode"
 import { translateResponsesToAnthropic, translateAnthropicToResponses, createResponsesSseTranslator, reasoningRequested, buildResponsesToolAliases, resolveCodexThreadIdentity, type ResponsesRequest, type AnthropicSseEvent as ResponsesAnthropicSseEvent } from "./openaiResponses"
 import { flattenAssistantContent, normalizeStructuredUserContent, replayToolResultHeader, frameStructuredReplay, coalesceStructuredUserMessages } from "./replay"
 import { extractAdvisorModel, extractSystemText, getLastUserMessage, stripAdvisorTools, stripNonStandardStreamFields, MULTIMODAL_TYPES, buildToolUseIndex, frameReplayTurns } from "./messages"
@@ -2129,8 +2129,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Use the client-local CWD for fingerprint bucketing so that two
         // independent client projects don't collide on the same first-user-
         // message hash even when they share an SDK cwd on the proxy host.
+        const cliSessionId = adapterBase === "passthrough" && !agentSessionId ? extractClaudeCodeSessionId(body) : undefined
+        const sessionScopedCwd = cliSessionId
+          ? `${clientWorkingDirectory ?? ""}::cc-session=${cliSessionId}` : clientWorkingDirectory
         const profileScopedCwd = profile.id !== "default"
-          ? `${clientWorkingDirectory}::profile=${profile.id}` : clientWorkingDirectory
+          ? `${sessionScopedCwd}::profile=${profile.id}` : sessionScopedCwd
         // Clients that run concurrent sub-request flows in the same conversation
         // (e.g. pylon's memory-extract fork or subagent children) share the same
         // (firstUserMessage, cwd) fingerprint as the parent — so meridian's
@@ -2175,7 +2178,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // direct connection. `isClaudeCodeClient` restores the parity: same
         // fingerprint keying a direct Claude Code request already gets, with
         // adapter selection untouched.
-        const ownsToolLoopWithResume = adapterBase === "claude-code" || isClaudeCodeClient(c)
+        const ownsToolLoopWithResume = adapterBase === "claude-code" || isClaudeCodeClient(c) || Boolean(cliSessionId)
         const isClientDrivenLoop = !ownsToolLoopWithResume && !agentSessionId && lastIsToolResult
         const durableMappingKey = profileSessionId
           || getConversationFingerprint(lineageMessages, profileScopedCwd)

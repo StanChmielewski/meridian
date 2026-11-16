@@ -172,3 +172,71 @@ describe("gateway-fronted Claude Code session identity", () => {
     expect(capturedOptions[1].resume).toBeUndefined()
   })
 })
+
+describe("gateway-fronted Claude Code jobs sharing a first message", () => {
+  const gateway = { "x-meridian-agent": "passthrough" }
+  const SESSION_A = "612cf7ce-52a8-4ffb-b418-187ecf3f1c0d"
+  const SESSION_B = "e26530ce-5c44-43c2-baf2-0f26109f75cf"
+  const withSession = (body: any, sessionId: string) => ({
+    ...body,
+    metadata: { user_id: JSON.stringify({ device_id: "dev", session_id: sessionId }) },
+  })
+  const followUp = (text: string) => ({
+    ...TURN_1,
+    messages: [...TURN_1.messages, { role: "assistant", content: "ok" }, { role: "user", content: text }],
+  })
+
+  beforeEach(() => {
+    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    capturedOptions = []
+    clearSessionCache()
+  })
+
+  afterEach(() => {
+    clearSessionCache()
+  })
+
+  it("resumes each interleaved job into its own session", async () => {
+    const app = createTestApp()
+    expect((await post(app, withSession(TURN_1, SESSION_A), gateway)).status).toBe(200)
+    expect((await post(app, withSession(TURN_1, SESSION_B), gateway)).status).toBe(200)
+    expect((await post(app, withSession(followUp("continue job A"), SESSION_A), gateway)).status).toBe(200)
+    expect((await post(app, withSession(followUp("continue job B"), SESSION_B), gateway)).status).toBe(200)
+    expect(capturedOptions).toHaveLength(4)
+    const [a1, b1, a2, b2] = capturedOptions
+    expect(a1.resume).toBeUndefined()
+    expect(b1.resume).toBeUndefined()
+    expect(a1.sessionId).not.toBe(b1.sessionId)
+    expect(a2.resume).toBe(a1.sessionId)
+    expect(b2.resume).toBe(b1.sessionId)
+  })
+
+  it("resumes a tool-result round of a job", async () => {
+    const app = createTestApp()
+    await post(app, withSession(TURN_1, SESSION_A), gateway)
+    await post(app, withSession(TURN_1, SESSION_B), gateway)
+    await post(app, withSession(TURN_2, SESSION_A), gateway)
+    expect(capturedOptions).toHaveLength(3)
+    expect(capturedOptions[2].resume).toBe(capturedOptions[0].sessionId)
+  })
+
+  it("keeps an auxiliary request of the same CLI session independent", async () => {
+    const app = createTestApp()
+    const auxiliary = { ...TURN_1, messages: [{ role: "user", content: "Summarise this conversation in five words." }] }
+    expect((await post(app, withSession(TURN_1, SESSION_A), gateway)).status).toBe(200)
+    expect((await post(app, withSession(auxiliary, SESSION_A), gateway)).status).toBe(200)
+    expect((await post(app, withSession(followUp("continue job A"), SESSION_A), gateway)).status).toBe(200)
+    expect(capturedOptions).toHaveLength(3)
+    expect(capturedOptions[1].resume).toBeUndefined()
+    expect(capturedOptions[2].resume).toBe(capturedOptions[0].sessionId)
+  })
+
+  it("falls back to the unscoped fingerprint when user_id is not Claude Code's envelope", async () => {
+    const app = createTestApp()
+    const opaque = (body: any) => ({ ...body, metadata: { user_id: "not-json" } })
+    await post(app, opaque(TURN_1), gateway)
+    await post(app, opaque(followUp("continue")), gateway)
+    expect(capturedOptions).toHaveLength(2)
+    expect(capturedOptions[1].resume).toBe(capturedOptions[0].sessionId)
+  })
+})
