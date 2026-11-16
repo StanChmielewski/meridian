@@ -256,6 +256,7 @@ interface RequestMeta {
   sessionQueueWaitMs: number
   sdkQueueWaitMs: number
   sdkActiveDurationMs: number
+  upstreamStallLoggedAt?: number
   /** Start of the SDK attempt currently running — the TTFB anchor. */
   currentSdkStartedAt?: number
   /**
@@ -335,6 +336,7 @@ function forkAttemptMeta(meta: RequestMeta, attempt: number): RequestMeta {
     sdkActiveDurationMs: 0,
     currentSdkStartedAt: undefined,
     ttfbMs: undefined,
+    upstreamStallLoggedAt: undefined,
   }
 }
 
@@ -493,8 +495,11 @@ function plog(message: string): void {
   if (!proxyLogSilent) console.error(message)
 }
 
-function logUpstreamStalled(requestId: string, mode: string, sinceLastMs: number): void {
-  plog(`[PROXY] ${requestId} upstream_stalled mode=${mode} sinceLastMs=${sinceLastMs} limitMs=${UPSTREAM_IDLE_MS}`)
+function logUpstreamStalled(meta: RequestMeta, mode: string, sinceLastMs: number): void {
+  const now = Date.now()
+  if (meta.upstreamStallLoggedAt !== undefined && now - meta.upstreamStallLoggedAt < UPSTREAM_IDLE_MS) return
+  meta.upstreamStallLoggedAt = now
+  plog(`[PROXY] ${meta.requestId} upstream_stalled mode=${mode} sinceLastMs=${sinceLastMs} limitMs=${UPSTREAM_IDLE_MS}`)
 }
 
 function logIdleStall(requestId: string, mode: string, error: UpstreamIdleError, verdict: IdleStallVerdict, recoveredAsToolUse = false): void {
@@ -884,7 +889,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       }
       sdkQuery = query(params)
       yield* guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) => {
-        logUpstreamStalled(requestMeta.requestId, mode, sinceLastMs)
+        logUpstreamStalled(requestMeta, mode, sinceLastMs)
         claudeLog("upstream.stalled", { mode, sinceLastMs })
       })
     } finally {
@@ -4814,7 +4819,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const sdkToClientIndex = new Map<number, number>()
 
               const guardedResponse = guardUpstreamIdle(response, UPSTREAM_IDLE_MS, (sinceLastMs) => {
-                logUpstreamStalled(requestMeta.requestId, "stream", sinceLastMs)
+                logUpstreamStalled(requestMeta, "stream", sinceLastMs)
                 claudeLog("upstream.stalled", {
                   mode: "stream",
                   model,

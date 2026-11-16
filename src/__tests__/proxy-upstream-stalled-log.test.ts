@@ -1,5 +1,3 @@
-// Runs in its own `bun test` invocation (see package.json): the idle limit is
-// read when server.ts loads, so it must be set before any other file imports it.
 process.env.MERIDIAN_UPSTREAM_IDLE_MS = "50"
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
@@ -11,7 +9,11 @@ import { withMockSdkSessionId, messageStart } from "./helpers"
 installSdkMock(() => ({
   query: (params: { options: { includePartialMessages?: boolean } }) => (async function* () {
     if (params.options.includePartialMessages) yield withMockSdkSessionId(messageStart(), params.options)
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
   })(),
   createSdkMcpServer: () => ({ type: "sdk", name: "fixture", instance: {} }),
   tool: () => ({}),
