@@ -493,6 +493,10 @@ function plog(message: string): void {
   if (!proxyLogSilent) console.error(message)
 }
 
+function logUpstreamStalled(requestId: string, mode: string, sinceLastMs: number): void {
+  plog(`[PROXY] ${requestId} upstream_stalled mode=${mode} sinceLastMs=${sinceLastMs} limitMs=${UPSTREAM_IDLE_MS}`)
+}
+
 function logIdleStall(requestId: string, mode: string, error: UpstreamIdleError, verdict: IdleStallVerdict, recoveredAsToolUse = false): void {
   const outcome = recoveredAsToolUse ? "recovered=tool_use" : `status=${verdict.status} type=${verdict.type}`
   plog(`[PROXY] ${requestId} upstream_idle mode=${mode} sinceLastMs=${error.sinceLastMs} limitMs=${error.idleMs} consecutive=${verdict.consecutive} ceiling=${UPSTREAM_IDLE_MAX_CONSECUTIVE} terminal=${verdict.terminal} ${outcome}`)
@@ -879,8 +883,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         params.options.spawnClaudeCodeProcess = processGate.spawnClaudeCodeProcess
       }
       sdkQuery = query(params)
-      yield* guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) =>
-        claudeLog("upstream.stalled", { mode, sinceLastMs }))
+      yield* guardUpstreamIdle(sdkQuery, UPSTREAM_IDLE_MS, (sinceLastMs) => {
+        logUpstreamStalled(requestMeta.requestId, mode, sinceLastMs)
+        claudeLog("upstream.stalled", { mode, sinceLastMs })
+      })
     } finally {
       try {
         // Production Query objects expose close(); test doubles and older SDK
@@ -4807,15 +4813,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               nextClientBlockIndex = 0
               const sdkToClientIndex = new Map<number, number>()
 
-              const guardedResponse = guardUpstreamIdle(response, UPSTREAM_IDLE_MS, (sinceLastMs) =>
+              const guardedResponse = guardUpstreamIdle(response, UPSTREAM_IDLE_MS, (sinceLastMs) => {
+                logUpstreamStalled(requestMeta.requestId, "stream", sinceLastMs)
                 claudeLog("upstream.stalled", {
                   mode: "stream",
                   model,
                   sinceLastMs,
                   streamEventsSeen,
                   firstChunkAt: firstChunkAt ?? null,
-                }),
-              )
+                })
+              })
               try {
                 for await (const message of guardedResponse) {
                   observePriorityAttemptMessage(message)
@@ -6062,6 +6069,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 ...(stderrOutput ? { stderr: stderrOutput } : {})
               })
               let streamErr: { status: number; type: string; message: string }
+              let streamIdleVerdict: IdleStallVerdict | undefined
               if (error instanceof UpstreamIdleError) {
                 // Stop advertising retries when this request reaches the ceiling.
                 // Subsequent identical requests also fail before opening SSE.
@@ -6071,7 +6079,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   error.sinceLastMs,
                   { key: idleRequestKey, now: performance.now() },
                 )
-                logIdleStall(requestMeta.requestId, "stream", error, verdict)
+                streamIdleVerdict = verdict
                 claudeLog("upstream.idle_streak", {
                   model,
                   sinceLastMs: error.sinceLastMs,
@@ -6123,6 +6131,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 capturedToolUses: capturedToolUses.length,
                 abortIsOurs: sawDuplicateToolUse,
               }) && messageStartEmitted
+              if (streamIdleVerdict && error instanceof UpstreamIdleError) {
+                logIdleStall(requestMeta.requestId, "stream", error, streamIdleVerdict, canRecoverAsToolUse)
+              }
 
               // A turn-cap stop is the one drain failure whose checkpoint is
               // safe to keep, and the reason is specific: the SDK can only

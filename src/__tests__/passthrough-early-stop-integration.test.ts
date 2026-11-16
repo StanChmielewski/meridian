@@ -13,6 +13,7 @@ import { installMcpToolsMock } from "./mcpToolsMock"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { UpstreamIdleError } from "../proxy/streamIdleGuard"
 import { assistantMessage, messageStart, textBlockStart, textDelta, toolUseBlockStart, inputJsonDelta, blockStop, messageDelta, messageStop, resolveMockSdkSessionId } from "./helpers"
 
 interface LifecycleResourceSnapshot {
@@ -2193,6 +2194,46 @@ describe("Integration: passthrough early stop", () => {
   // its no-visible-output nudge, and under
   // the cap that turn is refused. Before the cap it could not happen, because
   // the SDK had budget to finish. A 500 here is a hard user-visible regression.
+  it("stream: logs an idle stall recovered as the captured tool call", async () => {
+    const toolTurn = assistantMessage([
+      { type: "tool_use", id: "idle-log-tool", name: "read", input: { file_path: "x" } },
+    ])
+    mockMessages = [
+      messageStart("msg_idle_log"),
+      toolUseBlockStart(0, "read", "idle-log-tool"),
+      inputJsonDelta(0, '{"file_path":"x"}'),
+      blockStop(0),
+      messageDelta("tool_use"),
+      toolTurn,
+    ]
+    mockTerminalError = new UpstreamIdleError(90_000, 90_001)
+    const requestId = `idle-logline-${TEST_RUN_ID}`
+    const isMine = (l: string) => l.startsWith(`[PROXY] ${requestId} upstream_idle `)
+    const lines: string[] = []
+    const realError = console.error
+    console.error = (...args: unknown[]) => { lines.push(args.join(" ")) }
+    try {
+      const res = await post(app, {
+        model: "claude-sonnet-4-5",
+        max_tokens: 400,
+        stream: true,
+        tools: [READ_TOOL],
+        messages: [{ role: "user", content: "read x idle" }],
+      }, "es-idle-logline", { "x-request-id": requestId })
+      const body = await res.text()
+      expect(body).toContain("idle-log-tool")
+      expect(body).not.toContain("event: error")
+      for (let i = 0; i < 500 && !lines.some(isMine); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+    } finally {
+      console.error = realError
+    }
+    const idle = lines.filter(isMine)
+    expect(idle).toHaveLength(1)
+    expect(idle[0]).toEndWith("mode=stream sinceLastMs=90001 limitMs=90000 consecutive=1 ceiling=3 terminal=false recovered=tool_use")
+  })
+
   it("stream: a capped turn that captured no tool call does not fail the request", async () => {
     mockMessages = [
       messageStart("msg_capped_nothing"),
