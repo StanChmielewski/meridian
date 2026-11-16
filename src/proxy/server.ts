@@ -8,7 +8,7 @@ import { join } from "node:path"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { rateLimitStore } from "./rateLimitStore"
 import { guardUpstreamIdle, UpstreamIdleError } from "./streamIdleGuard"
-import { IdleStallCeilingError, IdleStallTracker, idleStallRequestKey } from "./idleStallCeiling"
+import { IdleStallCeilingError, IdleStallTracker, idleStallRequestKey, type IdleStallVerdict } from "./idleStallCeiling"
 import { linkRequestAbort } from "./requestAbort"
 import { processSessionTree, truncateSessionKey, type SessionTreeRegistration } from "./sessionTree"
 import { AbortableSemaphore, getProcessSdkSemaphore, type SemaphoreLease } from "./concurrency"
@@ -491,6 +491,11 @@ function buildFreshPrompt(
 let proxyLogSilent = false
 function plog(message: string): void {
   if (!proxyLogSilent) console.error(message)
+}
+
+function logIdleStall(requestId: string, mode: string, error: UpstreamIdleError, verdict: IdleStallVerdict, recoveredAsToolUse = false): void {
+  const outcome = recoveredAsToolUse ? "recovered=tool_use" : `status=${verdict.status} type=${verdict.type}`
+  plog(`[PROXY] ${requestId} upstream_idle mode=${mode} sinceLastMs=${error.sinceLastMs} limitMs=${error.idleMs} consecutive=${verdict.consecutive} ceiling=${UPSTREAM_IDLE_MAX_CONSECUTIVE} terminal=${verdict.terminal} ${outcome}`)
 }
 
 function logUsage(requestId: string, usage: TokenUsage): void {
@@ -2459,7 +2464,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Stable client/checkpoint identity survives a failed managed fork.
         const idleStallSessionKey = profileSessionId || resumeSessionId || ""
         const idlePreflight = idleStalls.preflight(idleStallSessionKey, idleRequestKey, UPSTREAM_IDLE_MS, performance.now())
-        if (idlePreflight) throw new IdleStallCeilingError(idlePreflight)
+        if (idlePreflight) {
+          plog(`[PROXY] ${requestMeta.requestId} upstream_idle_blocked consecutive=${idlePreflight.consecutive} status=${idlePreflight.status} type=${idlePreflight.type}`)
+          throw new IdleStallCeilingError(idlePreflight)
+        }
         const resumeFrom = lineageResult.type === "continuation" || lineageResult.type === "compaction"
           ? lineageResult.resumeFrom
           : undefined
@@ -3923,6 +3931,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // No client-disconnect abort reaches this path.
               abortIsOurs: true,
             })
+            if (idleVerdict && error instanceof UpstreamIdleError) {
+              logIdleStall(requestMeta.requestId, "non_stream", error, idleVerdict, canRecoverAsToolUse)
+            }
             if (canRecoverAsToolUse) {
               if (idleVerdict) {
                 idleStalls.clear(idleStallSessionKey)
@@ -6060,6 +6071,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   error.sinceLastMs,
                   { key: idleRequestKey, now: performance.now() },
                 )
+                logIdleStall(requestMeta.requestId, "stream", error, verdict)
                 claudeLog("upstream.idle_streak", {
                   model,
                   sinceLastMs: error.sinceLastMs,
