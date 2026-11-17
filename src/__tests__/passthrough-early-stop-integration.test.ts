@@ -1195,16 +1195,16 @@ describe("Integration: passthrough early stop", () => {
   // system[text]); the generic helpers reject role=system and forced a fresh
   // replay. The opt-in must resume and deliver the reminder as user text.
   const reminderCases = [false, true].flatMap(stream =>
-    ["claude-code", "opencode"].flatMap(adapter =>
+    ["claude-code", "passthrough", "opencode"].flatMap(adapter =>
       ["unchanged", "revised", "inserted"].flatMap(historyChange =>
         [false, true].map(image => ({ stream, adapter, historyChange, image })))))
   for (const { stream, adapter, historyChange, image } of reminderCases) {
-    it(`scopes trailing reminder checkpoint resume to Claude Code (adapter=${adapter}, stream=${stream}, historyChange=${historyChange}, image=${image})`, async () => {
+    it(`scopes trailing reminder checkpoint resume to Claude Code and passthrough (adapter=${adapter}, stream=${stream}, historyChange=${historyChange}, image=${image})`, async () => {
       const sessionId = `cc-delta-${adapter}-${stream}-${historyChange}-${image}-${TEST_RUN_ID}`
       const resultContent = image
         ? [{ type: "text", text: "hi" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "test-image" } }]
         : "hi"
-      const headers = { "x-meridian-agent": adapter, "x-opencode-session": sessionId }
+      const headers = { "x-meridian-agent": adapter, "x-opencode-session": sessionId, "x-litellm-session-id": sessionId }
       const initialSystemText = "You are Claude Code, Anthropic's official CLI for Claude."
       const trailingSystemText = "<system-reminder>Total tokens: 4151</system-reminder>"
       const toolTurn = assistantMessage([
@@ -1276,7 +1276,7 @@ describe("Integration: passthrough early stop", () => {
       expect(secondBody).toContain("the file says hi")
       expect(secondBody).not.toContain("CC_DELTA_GARBAGE_DIGEST")
 
-      if (adapter !== "claude-code" || historyChange !== "unchanged") {
+      if (adapter === "opencode" || historyChange !== "unchanged") {
         expect(capturedQueryParamsAll[1].options.resume).toBeUndefined()
         expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBeUndefined()
         const fresh = capturedQueryParamsAll[1]
