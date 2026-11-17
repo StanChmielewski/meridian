@@ -2290,7 +2290,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           ? durableMappingAtTurn.session.passthroughToolCallIds
           : undefined
         // NOTE: agent-specific (claude-code, also behind a passthrough gateway such as LiteLLM) — trailing system reminder of its mid-conversation-system feature; see allowTrailingSystemReminder.
-        const trailingSystemReminderOptions = adapterBase === "claude-code" || adapterBase === "passthrough"
+        const trailingSystemReminderOptions = adapterBase === "claude-code"
+          || (adapterBase === "passthrough" && extractClaudeCodeSessionId(body) !== undefined)
           ? { allowTrailingSystemReminder: true }
           : undefined
         const durableCheckpointContinuation = durableCheckpointIds?.length
