@@ -572,6 +572,7 @@ type PriorityDispatchOptions = {
   readonly sessionKey: string | null
   readonly wantsStream: boolean
   readonly currentProfileId: string | undefined
+  readonly lead?: string
   readonly turnWatchdogSignal?: AbortSignal
   readonly publicationTurn?: {
     readonly turnId: string
@@ -954,6 +955,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // deadlock the pool whenever MERIDIAN_MAX_CONCURRENT is 1. State is per
   // proxy instance.
   const priorityExhaustion = new ProfileExhaustion()
+  let priorityLead: string | undefined
   const PRIORITY_ASSIGNMENTS_MAX = 5000
   const priorityAssignments = new AssignmentStore(PRIORITY_ASSIGNMENTS_MAX)
   // The per-window reset cap lives in routing.ts (cooldownCapMs): a single
@@ -1245,6 +1247,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             requestId: options.publicationTurn?.turnId ?? previousAssignment?.requestId,
           })
         }
+        if (options.lead !== undefined && candidate !== options.lead) {
+          plog(`[PROXY] PRIORITY lead ${options.lead} -> ${candidate}`)
+          priorityLead = candidate
+        }
         if (previous) {
           claudeLog("profile.failover", { from: previous, to: candidate, reason: previousReason, sessionKey: options.sessionKey })
           plog(`[PROXY] PRIORITY failover ${previous} -> ${candidate} (${previousReason})`)
@@ -1264,6 +1270,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         earliestPoolReset = cooldownUntil
       }
       claudeLog("priority.exhausted", { profile: candidate, until: cooldownUntil, reason })
+      plog(`[PROXY] PRIORITY exhausted ${candidate} until=${new Date(cooldownUntil).toISOString()} reason=${reason}`)
       if (quotaRefusal) refinePriorityCooldown(candidate)
       lastError = sniffed.errorPayload
       lastStatus = inner.status
@@ -1278,6 +1285,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         return sniffed.response
       }
     }
+    plog(`[PROXY] PRIORITY pool_exhausted next_reset=${earliestPoolReset === null ? "unknown" : new Date(earliestPoolReset).toISOString()}`)
     // Every candidate ended before exposure. Release the exact durable claim
     // before the client can retry; failure stays fail-closed and never advances
     // to another account or returns a retryable account-shaped response.
@@ -1640,7 +1648,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         if (routingMode === "priority" && !options.forcedProfileId && !c.req.header("x-meridian-profile")) {
           const effectivePool = getEffectiveProfiles(finalConfig.profiles)
           if (effectivePool.length > 1) {
-            const { order, unknown } = resolvePriorityOrder(effectivePool.map(p => p.id), priorityProfileOrderSetting())
+            const resolved = resolvePriorityOrder(effectivePool.map(p => p.id), priorityProfileOrderSetting())
+            const unknown = resolved.unknown
+            const failbackPolicy = getPriorityFailbackPolicy(
+              process.env.MERIDIAN_PRIORITY_FAILBACK ?? getSetting("priorityFailback"),
+            )
+            const leadIndex = failbackPolicy === "on-exhaustion" && priorityLead !== undefined
+              ? resolved.order.indexOf(priorityLead) : -1
+            const order = leadIndex > 0
+              ? [...resolved.order.slice(leadIndex), ...resolved.order.slice(0, leadIndex)]
+              : resolved.order
             if (unknown.length > 0) claudeLog("priority.unknown_order_ids", { unknown })
             const assignmentCwd = adapter.extractClientWorkingDirectory?.(body)
               ?? adapter.extractWorkingDirectory(body)
@@ -1655,9 +1672,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const trustedTurn = requestMeta.routingTurnIdentity
               let promotionTurn = trustedTurn
               let publicationTurn: PriorityDispatchOptions["publicationTurn"]
-              const failbackPolicy = getPriorityFailbackPolicy(
-                process.env.MERIDIAN_PRIORITY_FAILBACK ?? getSetting("priorityFailback"),
-              )
               let durableRoute: PriorityDispatchOptions["durableRoute"]
               let assignment: PriorityAssignment | undefined
               let routeMappingIsCurrent = false
@@ -1794,6 +1808,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 sessionKey,
                 wantsStream: body.stream === true,
                 currentProfileId: assignedProfile,
+                ...(failbackPolicy === "on-exhaustion" ? { lead: preferred } : {}),
                 turnWatchdogSignal: options.turnWatchdogSignal,
                 publicationTurn,
                 claimTurn: trustedTurn,
@@ -7382,6 +7397,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   app.get("/profiles", async (c) => {
     const { profilePageHtml } = await import("../telemetry/profilePage")
     return c.html(profilePageHtml)
+  })
+
+  app.post("/profiles/exhaustion/clear", async (c) => {
+    const body = await c.req.json().catch(() => null) as { profile?: string } | null
+    const profile = body?.profile
+    if (!profile || !getEffectiveProfiles(finalConfig.profiles).some(p => p.id === profile)) {
+      return c.json({ error: "Unknown or missing 'profile'" }, 400)
+    }
+    priorityExhaustion.clear(profile)
+    plog(`[PROXY] PRIORITY exhaustion_cleared ${profile}`)
+    return c.json({ cleared: profile, exhausted: priorityExhaustion.snapshot() })
   })
 
   app.post("/profiles/active", async (c) => {

@@ -1205,7 +1205,7 @@ describe("Integration: passthrough early stop", () => {
         ? [{ type: "text", text: "hi" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "test-image" } }]
         : "hi"
       const passthrough = adapter.startsWith("passthrough")
-      const headers = passthrough
+      const headers: Record<string, string> = passthrough
         ? { "x-meridian-agent": "passthrough", "x-litellm-session-id": sessionId }
         : { "x-meridian-agent": adapter, "x-opencode-session": sessionId }
       const identity = adapter === "passthrough-generic" ? { metadata: {} } : {}

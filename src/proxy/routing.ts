@@ -25,7 +25,7 @@
 import { createHash } from "node:crypto"
 
 export type RoutingMode = "active" | "sticky" | "priority"
-export type PriorityFailbackPolicy = "new-conversation" | "next-user-turn"
+export type PriorityFailbackPolicy = "new-conversation" | "next-user-turn" | "on-exhaustion"
 
 export type PriorityAssignment = {
   readonly profileId: string
@@ -52,7 +52,9 @@ export function getRoutingMode(raw: string | undefined): RoutingMode {
 }
 
 export function getPriorityFailbackPolicy(raw: string | undefined): PriorityFailbackPolicy {
-  return raw?.toLowerCase() === "next-user-turn" ? "next-user-turn" : "new-conversation"
+  const lower = raw?.toLowerCase()
+  if (lower === "next-user-turn" || lower === "on-exhaustion") return lower
+  return "new-conversation"
 }
 
 export function shouldPromotePriorityAssignment(input: PriorityPromotionInput): boolean {
@@ -174,6 +176,10 @@ export class ProfileExhaustion {
     const existing = this.marks.get(id)
     if (existing && existing.until >= until) return
     this.marks.set(id, { until, reason })
+  }
+
+  clear(id: string): void {
+    this.marks.delete(id)
   }
 
   isExhausted(id: string): boolean {

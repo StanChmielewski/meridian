@@ -8,7 +8,7 @@
  * return to the preferred profile), exhaustion skip, and that the mode OFF
  * is byte-identical to today's behavior.
  */
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
+import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { installSdkMock } from "./sdkMock"
 import { installLoggerMock } from "./loggerMock"
 import { installMcpToolsMock } from "./mcpToolsMock"
@@ -543,6 +543,56 @@ describe("priority routing", () => {
     expect(res.status).toBe(429)
     expect(capturedEnvs.every((e) => e.includes("prof-work"))).toBe(true)
   }, 20_000)
+
+  it("on-exhaustion stays on the fallback until it is exhausted, then returns to the cleared first profile", async () => {
+    process.env.MERIDIAN_PRIORITY_FAILBACK = "on-exhaustion"
+    const lines: string[] = []
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")) })
+    try {
+      failingDirs.add("prof-work")
+      const app = createTestApp()
+      expect(await (await post(app, {}, "drain first conversation")).text()).toContain("prof-personal")
+      failingDirs.delete("prof-work")
+      const cleared = await app.fetch(new Request("http://localhost/profiles/exhaustion/clear", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile: "work" }),
+      }))
+      expect(cleared.status).toBe(200)
+      capturedEnvs = []
+      expect(await (await post(app, {}, "drain second conversation")).text()).toContain("prof-personal")
+      expect(capturedEnvs.every(dir => dir.includes("prof-personal"))).toBe(true)
+      failingDirs.add("prof-personal")
+      expect(await (await post(app, {}, "drain third conversation")).text()).toContain("prof-work")
+      const log = lines.join("\n")
+      expect(log).toContain("PRIORITY exhausted work")
+      expect(log).toContain("PRIORITY lead work -> personal")
+      expect(log).toContain("PRIORITY exhaustion_cleared work")
+      expect(log).toContain("PRIORITY exhausted personal")
+      expect(log).toContain("PRIORITY lead personal -> work")
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it("logs pool_exhausted when every profile is spent", async () => {
+    const lines: string[] = []
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")) })
+    try {
+      failingDirs.add("prof-work")
+      failingDirs.add("prof-personal")
+      const res = await post(createTestApp(), {}, "pool exhausted conversation")
+      expect(res.status).toBe(429)
+      expect(lines.join("\n")).toMatch(/PRIORITY pool_exhausted next_reset=\S+/)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it("rejects clearing an unknown profile's exhaustion", async () => {
+    const res = await createTestApp().fetch(new Request("http://localhost/profiles/exhaustion/clear", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile: "nope" }),
+    }))
+    expect(res.status).toBe(400)
+  })
 
   it("keeps a failed-over session on its target while NEW sessions drain back", async () => {
     failingDirs.add("prof-work")
