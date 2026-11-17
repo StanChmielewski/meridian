@@ -573,6 +573,29 @@ describe("priority routing", () => {
     }
   }, 30_000)
 
+  it("on-exhaustion does not move the lead for a session assigned elsewhere", async () => {
+    process.env.MERIDIAN_PRIORITY_FAILBACK = "on-exhaustion"
+    const lines: string[] = []
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")) })
+    try {
+      const app = createTestApp()
+      expect(await (await post(app, { "x-opencode-session": "lead-sticky" }, "sticky opening")).text()).toContain("prof-work")
+      failingDirs.add("prof-work")
+      expect(await (await post(app, { "x-opencode-session": "lead-other" }, "other opening")).text()).toContain("prof-personal")
+      failingDirs.delete("prof-work")
+      await app.fetch(new Request("http://localhost/profiles/exhaustion/clear", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile: "work" }),
+      }))
+      lines.length = 0
+      expect(await (await post(app, { "x-opencode-session": "lead-sticky" }, "sticky opening")).text()).toContain("prof-work")
+      expect(lines.join("\n")).not.toContain("PRIORITY lead")
+      capturedEnvs = []
+      expect(await (await post(app, {}, "after sticky conversation")).text()).toContain("prof-personal")
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
   it("logs pool_exhausted when every profile is spent", async () => {
     const lines: string[] = []
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")) })

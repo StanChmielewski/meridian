@@ -1247,7 +1247,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             requestId: options.publicationTurn?.turnId ?? previousAssignment?.requestId,
           })
         }
-        if (options.lead !== undefined && candidate !== options.lead) {
+        if (options.lead !== undefined && candidate !== options.lead
+          && (previous !== null || priorityExhaustion.isExhausted(options.lead))) {
           plog(`[PROXY] PRIORITY lead ${options.lead} -> ${candidate}`)
           priorityLead = candidate
         }
@@ -7407,7 +7408,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     }
     priorityExhaustion.clear(profile)
     plog(`[PROXY] PRIORITY exhaustion_cleared ${profile}`)
-    return c.json({ cleared: profile, exhausted: priorityExhaustion.snapshot() })
+    return c.json({ cleared: profile })
   })
 
   app.post("/profiles/active", async (c) => {
